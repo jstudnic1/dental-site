@@ -1,0 +1,59 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Logs
+logs
+*.log
+*.log.*
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build output
+/dist/
+/build/
+/.cache/
+/.parcel-cache/
+
+# Vite
+vite.svg
+vite.config.local.*
+
+# TypeScript
+*.tsbuildinfo
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Coverage
+coverage/
+
+# Misc
+*.local
+.tmp/
+.temp/
+.cache-loader/
+
+# OS/Archives
+Thumbs.db
+*.tgz
+*.zip

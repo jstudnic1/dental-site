@@ -1,0 +1,561 @@
+{
+  "name": "Instagram 30-day Rolling Refresh (Sheets)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 2
+            }
+          ]
+        }
+      },
+      "id": "cab2f52e-d943-4128-b8fa-f5bbe41933e6",
+      "name": "Schedule - Daily Refresh",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1136,
+        264
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1mFa0FuWZBPmbXQ7GtgSWYysn1nUc_ZvbS9p7dISap6A",
+          "mode": "list",
+          "cachedResultName": "test",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1mFa0FuWZBPmbXQ7GtgSWYysn1nUc_ZvbS9p7dISap6A/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "List 1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1mFa0FuWZBPmbXQ7GtgSWYysn1nUc_ZvbS9p7dISap6A/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "c19c3590-53f5-46e6-91b3-6480cf132687",
+      "name": "Google Sheets - Get Handles",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -912,
+        256
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "OSvgiYFTvlSG5jU2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 75,
+        "options": {}
+      },
+      "id": "3cbf527b-057b-473a-88d1-af76dc0e7635",
+      "name": "Split Handles in Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -688,
+        264
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "=https://graph.facebook.com/v20.0/{{$json.igUserId}}",
+        "options": {
+          "fullResponse": true,
+          "responseFormat": "json"
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "=business_discovery.username({{$json.handle || $json.Handle}}){followers_count,media_count,media.limit(25){id,media_type,timestamp,permalink,caption,like_count,comments_count}}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{$json.accessToken}}"
+            }
+          ]
+        }
+      },
+      "id": "413e0fc8-6cfc-4129-b341-43efc5aed394",
+      "name": "HTTP - BD Page 1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -464,
+        264
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const itemsOut = [];\nconst MAX_AGE_MS = 30 * 24 * 3600 * 1000;\nconst cutoff = Date.now() - MAX_AGE_MS;\n\nfor (const item of items) {\n  const raw = item.json || {};\n  const body = raw.body || raw;\n\n  if (body.error) {\n    const message = body.error.message || 'Business Discovery returned an error';\n    throw new Error(message);\n  }\n\n  const bd = body.business_discovery || {};\n  const handle = (bd.username || raw.handle || raw.Handle || raw.account || null);\n  if (!handle) {\n    throw new Error('Unable to determine handle for Business Discovery response');\n  }\n\n  const mediaData = Array.isArray(bd.media?.data) ? bd.media.data : [];\n  const filtered = mediaData.filter((m) => {\n    if (!m?.timestamp) {\n      return false;\n    }\n    return new Date(m.timestamp).getTime() >= cutoff;\n  });\n\n  const nowIso = new Date().toISOString();\n  const rows = filtered.map((m) => ({\n    account: handle,\n    media_id: m.id,\n    timestamp: m.timestamp,\n    media_type: m.media_type,\n    permalink: m.permalink,\n    caption: (m.caption || '').replace(/\\s+/g, ' ').trim(),\n    like_count: m.like_count ?? 0,\n    comments_count: m.comments_count ?? 0,\n    last_refreshed_at: nowIso,\n  }));\n\n  const afterCursor = bd.media?.paging?.cursors?.after ?? null;\n  let oldestTimestamp = null;\n  if (filtered.length) {\n    oldestTimestamp = new Date(filtered[filtered.length - 1].timestamp).getTime();\n  }\n  const shouldPaginate = Boolean(afterCursor && oldestTimestamp !== null && oldestTimestamp >= cutoff);\n\n  let usage = null;\n  let rawUsage = raw.headers?.['x-app-usage'] ?? raw.headers?.['X-App-Usage'];\n  if (Array.isArray(rawUsage)) {\n    rawUsage = rawUsage[0];\n  }\n  if (typeof rawUsage === 'string') {\n    try {\n      usage = JSON.parse(rawUsage);\n    } catch (error) {\n      usage = null;\n    }\n  } else if (rawUsage && typeof rawUsage === 'object') {\n    usage = rawUsage;\n  }\n\n  let needsBackoff = false;\n  if (usage) {\n    const callCount = Number(usage.call_count ?? usage.callCount ?? 0);\n    const totalTime = Number(usage.total_time ?? usage.totalTime ?? 0);\n    const totalCpu = Number(usage.total_cputime ?? usage.totalCpuTime ?? 0);\n    if (callCount >= 90 || totalTime >= 90 || totalCpu >= 90) {\n      needsBackoff = true;\n    }\n  }\n\n  itemsOut.push({\n    json: {\n      handle,\n      rows,\n      after: shouldPaginate ? afterCursor : null,\n      hasMore: shouldPaginate,\n      usage,\n      needsBackoff,\n      pageSize: mediaData.length,\n      fetchedAt: nowIso,\n    }\n  });\n}\n\nreturn itemsOut;"
+      },
+      "id": "ec0df9ac-0b80-4040-822b-b2d54e596c39",
+      "name": "Function - Process BD Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        -240,
+        264
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.needsBackoff}}",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "acd3b802-9990-4769-b070-1664f834d97d",
+      "name": "IF - Rate Limit?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -16,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const waitMs = 120000;\nawait new Promise((resolve) => setTimeout(resolve, waitMs));\nreturn items;"
+      },
+      "id": "83d2dc68-68a1-44b6-b4c1-a4a18f00b3a0",
+      "name": "Function - Rate Limit Wait",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        208,
+        264
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "rows",
+        "options": {}
+      },
+      "id": "c7969199-fb6a-4800-870b-2d5f35e6edb4",
+      "name": "Item Lists - Expand Media Rows",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3.1,
+      "position": [
+        432,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1TJVMc41eCE74yXjEGcW5yEvYrGU0KBAXDQjo7VlPqms",
+          "mode": "list",
+          "cachedResultName": "Upsert Media",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TJVMc41eCE74yXjEGcW5yEvYrGU0KBAXDQjo7VlPqms/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "List 1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1TJVMc41eCE74yXjEGcW5yEvYrGU0KBAXDQjo7VlPqms/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "media_id": ""
+          },
+          "matchingColumns": [
+            "media_id"
+          ],
+          "schema": [
+            {
+              "id": "media_id",
+              "displayName": "media_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "8f1eb005-b7d3-4ee1-8e94-d3c141c6d247",
+      "name": "Google Sheets - Upsert Media",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        656,
+        192
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "OSvgiYFTvlSG5jU2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{!!$json.after}}",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ac8f254e-009c-410e-b932-42bfe0d15566",
+      "name": "IF - Has Next Cursor?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        432,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const waitMs = 2000;\nawait new Promise((resolve) => setTimeout(resolve, waitMs));\nreturn items;"
+      },
+      "id": "94dc62b0-d3cd-4c6a-993c-42aa6e026d33",
+      "name": "Function - Pagination Delay",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        656,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "=https://graph.facebook.com/v20.0/{{$json.igUserId}}",
+        "options": {
+          "fullResponse": true,
+          "responseFormat": "json"
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "=business_discovery.username({{$json.handle}}){media.after({{$json.after}}).limit(25){id,media_type,timestamp,permalink,caption,like_count,comments_count}}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{$json.accessToken}}"
+            }
+          ]
+        }
+      },
+      "id": "c16d0927-8581-4c70-b4c7-af7164c232f4",
+      "name": "HTTP - BD Next Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        168
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months",
+              "triggerAtHour": 3
+            }
+          ]
+        }
+      },
+      "id": "77403486-ae7e-4261-91bf-83c6f7009b3c",
+      "name": "Schedule - Monthly Token Refresh",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1136,
+        488
+      ]
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "https://graph.instagram.com/refresh_access_token",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "grant_type",
+              "value": "ig_refresh_token"
+            },
+            {
+              "name": "access_token",
+              "value": "={{$json.accessToken}}"
+            }
+          ]
+        }
+      },
+      "id": "17178bbc-fdf5-4e54-92bd-5e4d3814c3e1",
+      "name": "HTTP - Refresh IG Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -912,
+        488
+      ]
+    },
+    {
+      "id": "15",
+      "name": "Set - IG Credentials",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        -40
+      ],
+      "parameters": {
+        "keepOnlySet": false,
+        "values": {
+          "string": [
+            {
+              "name": "igUserId",
+              "value": "REPLACE_WITH_IG_USER_ID"
+            },
+            {
+              "name": "accessToken",
+              "value": "REPLACE_WITH_LONG_LIVED_TOKEN"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "16",
+      "name": "Set - Access Token",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        -620,
+        240
+      ],
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "accessToken",
+              "value": "REPLACE_WITH_LONG_LIVED_TOKEN"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule - Daily Refresh": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Get Handles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets - Get Handles": {
+      "main": [
+        [
+          {
+            "node": "Set - IG Credentials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Handles in Batches": {
+      "main": [
+        [
+          {
+            "node": "HTTP - BD Page 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "HTTP - BD Page 1": {
+      "main": [
+        [
+          {
+            "node": "Function - Process BD Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Process BD Response": {
+      "main": [
+        [
+          {
+            "node": "IF - Rate Limit?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Rate Limit?": {
+      "main": [
+        [
+          {
+            "node": "Function - Rate Limit Wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Item Lists - Expand Media Rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF - Has Next Cursor?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Rate Limit Wait": {
+      "main": [
+        [
+          {
+            "node": "Item Lists - Expand Media Rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF - Has Next Cursor?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Item Lists - Expand Media Rows": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Upsert Media",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Has Next Cursor?": {
+      "main": [
+        [
+          {
+            "node": "Function - Pagination Delay",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Pagination Delay": {
+      "main": [
+        [
+          {
+            "node": "HTTP - BD Next Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - BD Next Page": {
+      "main": [
+        [
+          {
+            "node": "Function - Process BD Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule - Monthly Token Refresh": {
+      "main": [
+        [
+          {
+            "node": "Set - Access Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - IG Credentials": {
+      "main": [
+        [
+          {
+            "node": "Split Handles in Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Access Token": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Refresh IG Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "660dd1d6-4241-41b8-9d16-01809ccc1b8a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "7486b8b47b2712a8f97496b3836b9cb77ef456470e56fbd7a709c2bdb4e434a0"
+  },
+  "id": "MNzxRqVUHYI1m4q4",
+  "tags": []
+}

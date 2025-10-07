@@ -1,0 +1,472 @@
+{
+  "name": "Instagram 30-day Rolling Refresh (Sheets)",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Schedule - Daily Refresh",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        -40
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 2,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Google Sheets - Get Handles",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -500,
+        -40
+      ],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "options": {
+          "useFirstRowAsHeader": true,
+          "valueRenderMode": "FORMATTED_VALUE"
+        }
+      }
+    },
+    {
+      "id": "3",
+      "name": "Split Handles in Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -260,
+        -40
+      ],
+      "parameters": {
+        "batchSize": 75
+      }
+    },
+    {
+      "id": "4",
+      "name": "HTTP - BD Page 1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -40,
+        -40
+      ],
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "https://graph.facebook.com/v20.0/{{$env.IG_USER_ID}}",
+        "options": {
+          "fullResponse": true,
+          "responseFormat": "json"
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "=business_discovery.username({{$json.handle || $json.Handle}}){followers_count,media_count,media.limit(25){id,media_type,timestamp,permalink,caption,like_count,comments_count}}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{$env.IG_ACCESS_TOKEN}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "5",
+      "name": "Function - Process BD Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        180,
+        -40
+      ],
+      "parameters": {
+        "functionCode": "const itemsOut = [];\nconst MAX_AGE_MS = 30 * 24 * 3600 * 1000;\nconst cutoff = Date.now() - MAX_AGE_MS;\n\nfor (const item of items) {\n  const raw = item.json || {};\n  const body = raw.body || raw;\n\n  if (body.error) {\n    const message = body.error.message || 'Business Discovery returned an error';\n    throw new Error(message);\n  }\n\n  const bd = body.business_discovery || {};\n  const handle = (bd.username || raw.handle || raw.Handle || raw.account || null);\n  if (!handle) {\n    throw new Error('Unable to determine handle for Business Discovery response');\n  }\n\n  const mediaData = Array.isArray(bd.media?.data) ? bd.media.data : [];\n  const filtered = mediaData.filter((m) => {\n    if (!m?.timestamp) {\n      return false;\n    }\n    return new Date(m.timestamp).getTime() >= cutoff;\n  });\n\n  const nowIso = new Date().toISOString();\n  const rows = filtered.map((m) => ({\n    account: handle,\n    media_id: m.id,\n    timestamp: m.timestamp,\n    media_type: m.media_type,\n    permalink: m.permalink,\n    caption: (m.caption || '').replace(/\\s+/g, ' ').trim(),\n    like_count: m.like_count ?? 0,\n    comments_count: m.comments_count ?? 0,\n    last_refreshed_at: nowIso,\n  }));\n\n  const afterCursor = bd.media?.paging?.cursors?.after ?? null;\n  let oldestTimestamp = null;\n  if (filtered.length) {\n    oldestTimestamp = new Date(filtered[filtered.length - 1].timestamp).getTime();\n  }\n  const shouldPaginate = Boolean(afterCursor && oldestTimestamp !== null && oldestTimestamp >= cutoff);\n\n  let usage = null;\n  let rawUsage = raw.headers?.['x-app-usage'] ?? raw.headers?.['X-App-Usage'];\n  if (Array.isArray(rawUsage)) {\n    rawUsage = rawUsage[0];\n  }\n  if (typeof rawUsage === 'string') {\n    try {\n      usage = JSON.parse(rawUsage);\n    } catch (error) {\n      usage = null;\n    }\n  } else if (rawUsage && typeof rawUsage === 'object') {\n    usage = rawUsage;\n  }\n\n  let needsBackoff = false;\n  if (usage) {\n    const callCount = Number(usage.call_count ?? usage.callCount ?? 0);\n    const totalTime = Number(usage.total_time ?? usage.totalTime ?? 0);\n    const totalCpu = Number(usage.total_cputime ?? usage.totalCpuTime ?? 0);\n    if (callCount >= 90 || totalTime >= 90 || totalCpu >= 90) {\n      needsBackoff = true;\n    }\n  }\n\n  itemsOut.push({\n    json: {\n      handle,\n      rows,\n      after: shouldPaginate ? afterCursor : null,\n      hasMore: shouldPaginate,\n      usage,\n      needsBackoff,\n      pageSize: mediaData.length,\n      fetchedAt: nowIso,\n    }\n  });\n}\n\nreturn itemsOut;"
+      }
+    },
+    {
+      "id": "6",
+      "name": "IF - Rate Limit?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        -40
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.needsBackoff}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "7",
+      "name": "Function - Rate Limit Wait",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        620,
+        80
+      ],
+      "parameters": {
+        "functionCode": "const waitMs = 120000;\nawait new Promise((resolve) => setTimeout(resolve, waitMs));\nreturn items;"
+      }
+    },
+    {
+      "id": "8",
+      "name": "Item Lists - Expand Media Rows",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3.1,
+      "position": [
+        620,
+        -120
+      ],
+      "parameters": {
+        "resource": "itemList",
+        "operation": "splitOutItems",
+        "fieldToSplitOut": "rows",
+        "include": "noOtherFields"
+      }
+    },
+    {
+      "id": "9",
+      "name": "Google Sheets - Upsert Media",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        860,
+        -120
+      ],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "columnToMatchOn": "={{'media_id'}}",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        }
+      }
+    },
+    {
+      "id": "10",
+      "name": "IF - Has Next Cursor?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        400,
+        -220
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{!!$json.after}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "11",
+      "name": "Function - Pagination Delay",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        620,
+        -220
+      ],
+      "parameters": {
+        "functionCode": "const waitMs = 2000;\nawait new Promise((resolve) => setTimeout(resolve, waitMs));\nreturn items;"
+      }
+    },
+    {
+      "id": "12",
+      "name": "HTTP - BD Next Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        -220
+      ],
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "https://graph.facebook.com/v20.0/{{$env.IG_USER_ID}}",
+        "options": {
+          "fullResponse": true,
+          "responseFormat": "json"
+        },
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "=business_discovery.username({{$json.handle}}){media.after({{$json.after}}).limit(25){id,media_type,timestamp,permalink,caption,like_count,comments_count}}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{$env.IG_ACCESS_TOKEN}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "13",
+      "name": "Schedule - Monthly Token Refresh",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [
+        -740,
+        240
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months",
+              "monthsInterval": 1,
+              "triggerAtDayOfMonth": 1,
+              "triggerAtHour": 3,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "14",
+      "name": "HTTP - Refresh IG Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -500,
+        240
+      ],
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "https://graph.instagram.com/refresh_access_token",
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "grant_type",
+              "value": "ig_refresh_token"
+            },
+            {
+              "name": "access_token",
+              "value": "={{$env.IG_ACCESS_TOKEN}}"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule - Daily Refresh": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Get Handles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets - Get Handles": {
+      "main": [
+        [
+          {
+            "node": "Split Handles in Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Handles in Batches": {
+      "main": [
+        [
+          {
+            "node": "HTTP - BD Page 1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "HTTP - BD Page 1": {
+      "main": [
+        [
+          {
+            "node": "Function - Process BD Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Process BD Response": {
+      "main": [
+        [
+          {
+            "node": "IF - Rate Limit?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Rate Limit?": {
+      "main": [
+        [
+          {
+            "node": "Function - Rate Limit Wait",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Item Lists - Expand Media Rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF - Has Next Cursor?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Rate Limit Wait": {
+      "main": [
+        [
+          {
+            "node": "Item Lists - Expand Media Rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF - Has Next Cursor?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Item Lists - Expand Media Rows": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Upsert Media",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Has Next Cursor?": {
+      "main": [
+        [
+          {
+            "node": "Function - Pagination Delay",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Split Handles in Batches",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Function - Pagination Delay": {
+      "main": [
+        [
+          {
+            "node": "HTTP - BD Next Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - BD Next Page": {
+      "main": [
+        [
+          {
+            "node": "Function - Process BD Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule - Monthly Token Refresh": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Refresh IG Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "tags": [],
+  "id": "00000000-0000-0000-0000-000000000001",
+  "meta": {
+    "template": {
+      "version": "1.0"
+    }
+  }
+}
