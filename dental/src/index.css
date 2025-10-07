@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+[data-us-badge],
+a[href*="unicornstudio"],
+a[href*="unicorn.studio"] {
+  display: none !important;
+}
