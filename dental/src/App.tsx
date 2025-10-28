@@ -1,3 +1,4 @@
+import emailjs from '@emailjs/browser';
 import { ChangeEvent, FormEvent, useEffect, useState } from 'react';
 import { Mic, Calendar, Users, Shield, Instagram, Twitter, PlayCircle } from 'lucide-react';
 
@@ -31,18 +32,20 @@ type LanguageContent = {
     heading: string;
     description: string;
     bullets: string[];
-    form: {
-      nameLabel: string;
-      namePlaceholder: string;
-      emailLabel: string;
-      emailPlaceholder: string;
-      clinicLabel: string;
-      clinicPlaceholder: string;
-      notesLabel: string;
-      notesPlaceholder: string;
-      submitCta: string;
-      success: string;
-    };
+      form: {
+        nameLabel: string;
+        namePlaceholder: string;
+        emailLabel: string;
+        emailPlaceholder: string;
+        clinicLabel: string;
+        clinicPlaceholder: string;
+        notesLabel: string;
+        notesPlaceholder: string;
+        submitCta: string;
+        submittingCta: string;
+        success: string;
+        error: string;
+      };
   };
   footer: {
     privacy: string;
@@ -126,7 +129,9 @@ const translations: Record<Language, LanguageContent> = {
         notesLabel: 'What would you like to cover?',
         notesPlaceholder: 'e.g. Integrate with Dentrix, after-hours voice, custom cancellation flow',
         submitCta: 'Request demo',
-        success: 'Thanks! We will reach out within one business day to confirm your session.'
+        submittingCta: 'Sending...',
+        success: 'Thanks! We will reach out within one business day to confirm your session.',
+        error: 'Oops! Something went wrong. Please try again or email us directly.'
       }
     },
     footer: {
@@ -204,7 +209,9 @@ const translations: Record<Language, LanguageContent> = {
         notesLabel: 'Co chcete probrat?',
         notesPlaceholder: 'nap\u0159. napojen\u00ed na Dentrix, hlas po pracovn\u00ed dob\u011b, ru\u0161en\u00ed term\u00edn\u016f',
         submitCta: 'Po\u017eadat o demo',
-        success: 'D\u011bkujeme! Ozveme se do jednoho pracovn\u00edho dne a potvrd\u00edme term\u00edn uk\u00e1zky.'
+        submittingCta: 'Odes\u00edl\u00e1m...',
+        success: 'D\u011bkujeme! Ozveme se do jednoho pracovn\u00edho dne a potvrd\u00edme term\u00edn uk\u00e1zky.',
+        error: 'Jejda! N\u011bco se nepovedlo. Zkuste to pros\u00edm znovu nebo n\u00e1m napi\u0161te p\u0159\u00edmo.'
       }
     },
     footer: {
@@ -317,7 +324,8 @@ function App() {
     clinic: '',
     notes: ''
   });
-  const [demoStatus, setDemoStatus] = useState<'idle' | 'success'>('idle');
+  const [demoStatus, setDemoStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [isSendingDemo, setIsSendingDemo] = useState(false);
 
   const content = translations[language];
   const featureIcons = [Calendar, Users, Shield];
@@ -347,15 +355,52 @@ function App() {
     field: keyof typeof demoForm,
   ) => (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setDemoForm((prev) => ({ ...prev, [field]: event.target.value }));
-    if (demoStatus === 'success') {
+    if (demoStatus !== 'idle') {
       setDemoStatus('idle');
     }
   };
 
-  const handleDemoSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleDemoSubmit = async (event: FormEvent<HTMLFormElement>) => {
+	console.log('demoForm', demoForm);
     event.preventDefault();
-    setDemoStatus('success');
-    setDemoForm({ name: '', email: '', clinic: '', notes: '' });
+	if (isSendingDemo) {
+      return;
+    }
+
+    const serviceId = import.meta.env.VITE_EMAILJS_SERVICE_ID;
+    const templateId = import.meta.env.VITE_EMAILJS_TEMPLATE_ID;
+    const publicKey = import.meta.env.VITE_EMAILJS_PUBLIC_KEY;
+
+    if (!serviceId || !templateId || !publicKey) {
+      console.warn('EmailJS environment variables are missing. Please define VITE_EMAILJS_SERVICE_ID, VITE_EMAILJS_TEMPLATE_ID, and VITE_EMAILJS_PUBLIC_KEY.');
+      setDemoStatus('error');
+      return;
+    }
+
+    setIsSendingDemo(true);
+    setDemoStatus('idle');
+
+    try {
+      await emailjs.send(
+        serviceId,
+        templateId,
+        {
+          name: demoForm.name,
+          email: demoForm.email,
+          clinic: demoForm.clinic,
+          notes: demoForm.notes,
+          language,
+        },
+        publicKey
+      );
+      setDemoStatus('success');
+      setDemoForm({ name: '', email: '', clinic: '', notes: '' });
+    } catch (error) {
+      console.error('Failed to send demo request via EmailJS', error);
+      setDemoStatus('error');
+    } finally {
+      setIsSendingDemo(false);
+    }
   };
 
   return (
@@ -576,11 +621,18 @@ function App() {
 
                 <button
                   type="submit"
-                  className="w-full rounded-full bg-blue-500 px-6 py-3 text-white transition-colors hover:bg-blue-600"
+                  disabled={isSendingDemo}
+                  aria-busy={isSendingDemo}
+                  className="w-full rounded-full bg-blue-500 px-6 py-3 text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {content.bookDemo.form.submitCta}
+                  {isSendingDemo ? content.bookDemo.form.submittingCta : content.bookDemo.form.submitCta}
                 </button>
 
+                {demoStatus === 'error' && (
+                  <p className="rounded-2xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {content.bookDemo.form.error}
+                  </p>
+                )}
                 {demoStatus === 'success' && (
                   <p className="rounded-2xl border border-green-100 bg-green-50 px-4 py-3 text-sm text-green-700">
                     {content.bookDemo.form.success}
